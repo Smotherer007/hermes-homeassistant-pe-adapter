@@ -1,0 +1,21 @@
+{
+  "host": "voice-pe.local",
+  "secrets": "~/.config/voice-pe/secrets.yaml",
+  "language": "de",
+
+  "stt_url": "https://api.mistral.ai",
+  "stt_model": "voxtral-mini-transcribe-3",
+  "stt_dialect": "mistral",
+  "stt_bias": ["Hermes", "Pi", "JSON", "API", "Repository", "Docker"],
+
+  "tts_url": "https://api.mistral.ai",
+  "tts_model": "voxtral-mini-tts-3-0",
+  "tts_dialect": "mistral",
+  "tts_voice": "voice_481",
+
+  "answer_cmd": "hermes -z {text}",
+  "answer_timeout": 600,
+  "silence_ms": 900,
+  "max_seconds": 90,
+  "dump": "/tmp/pe-last.wav"
+}
