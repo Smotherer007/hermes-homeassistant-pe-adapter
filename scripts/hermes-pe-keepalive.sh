@@ -2,8 +2,12 @@
 # Keep the voice adapter running where there is no systemd.
 #
 # Meant for a cron entry every few minutes, or for docker's restart policy to sit on top
-# of. It starts the daemon mode of the adapter, which keeps one ESPHome subscription open
-# and therefore keeps the wake word armed on the device.
+# of. It starts the `serve` mode of the adapter: one ESPHome subscription for the life of
+# the process, which keeps the wake word armed, and a full answer per question.
+#
+# Not `daemon`: that mode holds the subscription too but waits for {"cmd":"answer", ...}
+# on stdin, which only a driver sends. Detached with stdin closed it transcribes every
+# question and then stays silent until the answer timeout.
 #
 #   */2 * * * *  /path/to/repo/scripts/hermes-pe-keepalive.sh
 #
@@ -68,11 +72,11 @@ if adapter_pid >/dev/null; then
 fi
 
 mkdir -p "$(dirname "$LOG")"
-# setsid detaches the daemon from this shell's session: a scheduler that exits right after
+# setsid detaches the adapter from this shell's session: a scheduler that exits right after
 # starting it does not take it down. </dev/null because there is no terminal to read from.
 cd "$REPO"
 setsid nohup "$PYTHON" -u -m hermes_pe.bridge \
   --config "$CONFIG" \
-  daemon >>"$LOG" 2>&1 </dev/null &
+  serve >>"$LOG" 2>&1 </dev/null &
 
 exit 0

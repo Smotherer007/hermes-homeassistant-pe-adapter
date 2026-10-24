@@ -123,20 +123,25 @@ which means the device never fetched the file.
 
 ```bash
 python src/hermes_pe/bridge.py --config config.json turn     # one turn, then exit (default)
-python src/hermes_pe/bridge.py --config config.json daemon   # turns forever, wake word re-armed
+python src/hermes_pe/bridge.py --config config.json serve    # turns forever, one subscription
+python src/hermes_pe/bridge.py --config config.json daemon   # same subscription, answers over stdin
 python src/hermes_pe/bridge.py --config config.json probe    # print what the device reports
 python src/hermes_pe/bridge.py --config config.json listen   # capture one sentence, print text
 python src/hermes_pe/bridge.py --config config.json say --file answer.wav
 ```
 
-`turn` is what a supervisor or a container should use. `daemon` keeps one ESPHome
-subscription open, which is what keeps the wake word armed on the device.
+`serve` is what a supervisor or a container should use: it keeps one ESPHome subscription
+open, so the wake word stays armed, and it answers every question itself. `turn` does the
+same for a single question and then exits; `daemon` holds the subscription too but speaks
+only what a driver sends on stdin, so it needs the pi extension to be useful.
 
 ## Deployment
 
 `docs/INSTALL.md` has the three ways this runs: a systemd user unit on a normal host, a
 watchdog script plus cron where there is no init system (containers with s6 or tini), and
-what a container needs in terms of published ports.
+what a container needs in terms of published ports. `scripts/hermes-voice.sh` is the
+`answer_cmd` wrapper used in the reference setup — it keeps the spoken-answer instruction
+in front of the transcript without the transcript ever reaching a shell.
 
 ## Endpoint dialects
 

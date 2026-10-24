@@ -27,6 +27,29 @@ TTS port is the one the device can reach. Two settings cover the difference:
 They are the same value unless the adapter sits behind NAT, in a container, or on a host
 with several addresses.
 
+## Which mode to run
+
+`serve` is what a long-running installation wants: it holds one voice-assistant
+subscription for the life of the process and answers every question itself. The wake word
+stays armed, there is no gap between turns, and a supervisor only has to restart the
+process when it dies.
+
+`turn` answers a question end to end and exits. Useful for testing and for a supervisor
+that starts one process per question; between two runs the device is unsubscribed, so a
+loop around it loses about two seconds per turn.
+
+`daemon` is not a standalone mode. It keeps the subscription open, but after a transcript
+it waits for a line on stdin:
+
+```
+{"cmd": "answer", "file": "/tmp/answer.wav"}
+{"cmd": "skip"}
+```
+
+That is the interface the pi extension drives. Started detached with stdin closed, nothing
+sends that line, and the device sits in its "thinking" LED phase until `answer_timeout`
+runs out — the log shows `transcript` and nothing after it.
+
 ## A normal host: systemd
 
 ```ini
@@ -40,7 +63,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/hermes-homeassistant-pe-adapter
 EnvironmentFile=%h/.config/voice-pe/env
-ExecStart=%h/hermes-homeassistant-pe-adapter/.venv/bin/python -u -m hermes_pe.bridge --config config.json daemon
+ExecStart=%h/hermes-homeassistant-pe-adapter/.venv/bin/python -u -m hermes_pe.bridge --config config.json serve
 Restart=always
 RestartSec=5
 
@@ -79,7 +102,7 @@ Two details in it exist because they cost real time:
 * `pgrep -f` matches its own caller, because the pattern is part of the shell's command
   line. Without a check on the process name, the watchdog finds itself and never starts
   anything.
-* the daemon is started with `setsid`, so the scheduler exiting does not take it down.
+* the adapter is started with `setsid`, so the scheduler exiting does not take it down.
 
 ## A container
 
