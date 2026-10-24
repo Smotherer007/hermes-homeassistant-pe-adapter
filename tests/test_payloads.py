@@ -21,6 +21,7 @@ from hermes_pe.bridge import (  # noqa: E402
     normalize_paths,
     pcm_chunks,
     resolve_path,
+    Utterance,
     build_stt_fields,
     build_tts_body,
 )
@@ -96,6 +97,34 @@ class Paths(unittest.TestCase):
     def test_parser_normalizes_the_paths_it_receives(self):
         options = build_parser().parse_args(["--secrets", "~/.config/voice-pe/secrets.yaml"])
         self.assertFalse(normalize_paths(options).secrets.startswith("~"))
+
+
+class UtteranceFloor(unittest.TestCase):
+    """The regression that killed the audio handler on the first and every 50th chunk."""
+
+    @staticmethod
+    def frames(level: int, count: int) -> bytes:
+        import struct
+
+        return b"".join(struct.pack("<h", level) for _ in range(count * 320))
+
+    def test_noise_and_threshold_are_readable(self):
+        utterance = Utterance(silence_ms=900, max_seconds=60)
+        utterance.push(self.frames(0, 2))
+        self.assertGreaterEqual(utterance.noise, 0.0)
+        self.assertGreaterEqual(utterance.threshold(), 300.0)
+
+    def test_the_log_line_does_not_raise_after_the_first_chunk(self):
+        utterance = Utterance(silence_ms=900, max_seconds=60)
+        utterance.push(self.frames(5, 1))
+        # This is exactly what the audio handler formats every 50 chunks.
+        self.assertIsInstance(f"{utterance.noise:.1f} {utterance.threshold():.1f}", str)
+        self.assertEqual(utterance.vad.noise, utterance.noise)
+
+    def test_a_loud_burst_then_silence_ends_the_utterance(self):
+        utterance = Utterance(silence_ms=200, max_seconds=30)
+        self.assertFalse(utterance.push(self.frames(6000, 4)))
+        self.assertTrue(utterance.push(self.frames(0, 60)))
 
 
 class AudioChunks(unittest.TestCase):

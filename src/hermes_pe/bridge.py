@@ -178,6 +178,17 @@ class Utterance:
     def seconds(self) -> float:
         return self.bytes_seen / (SAMPLE_RATE * 2)
 
+    @property
+    def noise(self) -> float:
+        """The measured room floor.
+
+        It lives on the detector, but the log line and `threshold()` ask the
+        utterance for it. Delegating keeps one number instead of two estimates;
+        without this, every first and every 50th chunk raised AttributeError and
+        took the whole audio handler down with it.
+        """
+        return self.vad.noise
+
     def threshold(self) -> float:
         # Relative to the quietest thing the microphone hears, not to a table value and
         # not to the wake-word chime: the chime is loud, the room is not.
