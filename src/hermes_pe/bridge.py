@@ -496,12 +496,13 @@ class TtsServer:
         self.port: int = 0
         self.files: dict[str, bytes] = {}
 
-    async def start(self) -> int:
+    async def start(self, port: int = 0) -> int:
+        """Listen on `port` (0 = any free port), which a container needs published."""
         app = web.Application()
         app.router.add_get("/tts/{name}", self.handle)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "0.0.0.0", 0)
+        site = web.TCPSite(self.runner, "0.0.0.0", port)
         await site.start()
         self.port = site._server.sockets[0].getsockname()[1]  # noqa: SLF001 - the only way to learn the port
         return self.port
@@ -547,7 +548,7 @@ class Bridge:
         key = config.get("api_key", "")
         self.client = APIClient(self.options.host, self.options.port, None, noise_psk=key or None)
         await self.client.connect(login=True)
-        await self.tts_server.start()
+        await self.tts_server.start(self.options.tts_port)
         info = await self.client.device_info()
         emit("connected", device=info.name, version=info.esphome_version)
 
@@ -691,7 +692,11 @@ class Bridge:
             emit("tts_file", flac_bytes=len(flac), seconds=round(duration, 2))
 
             # The device fetches the file itself and plays it through its media player.
-            url = f"http://{self.local_ip}:{self.tts_server.port}/tts/{name}"
+            # `tts_public_base` exists because the adapter's own IP is often not the one
+            # the device can reach: inside a container it is a bridge address, and the
+            # reachable address is the published port on the host.
+            base = (self.options.tts_public_base or f"http://{self.local_ip}:{self.tts_server.port}").rstrip("/")
+            url = f"{base}/tts/{name}"
             self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": reply})
             self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": url})
             emit("tts_url", url=url, seconds=round(duration, 2))
@@ -1051,7 +1056,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--answer", default="", help="fixed answer instead of running --answer-cmd")
     parser.add_argument("--answer-cmd", default=DEFAULT_ANSWER_CMD, help="command that produces the spoken answer")
     parser.add_argument("--tts-extra", default="", help="JSON merged into the TTS request")
-    parser.add_argument("--audio-mode", default="api", choices=["api", "url"],
+    parser.add_argument("--tts-public-base", default="",
+                        help="base URL the device should use for the generated file, e.g. http://192.168.1.10:8899 "
+                             "(default: this adapter's own address, which is wrong behind NAT or in a container)")
+    parser.add_argument("--tts-port", type=int, default=0,
+                        help="fixed port for the TTS file server (0 = any free port). A published container port "
+                             "needs a fixed value here")
+    parser.add_argument("--audio-mode", default="url", choices=["api", "url"],
                         help="api streams PCM over the ESPHome connection and works wherever the "
                              "adapter runs; url serves a FLAC file the device fetches itself, "
                              "which needs an IP the device can reach")

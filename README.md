@@ -88,19 +88,36 @@ Every flag exists as a config key, and an explicit flag wins over the file.
 Keys are read from the environment (`MISTRAL_API_KEY`) and never from the config file, so
 a repository, a unit file or a container definition cannot leak them.
 
-## Audio back to the device: two modes
+## Audio back to the device
 
-`audio_mode` decides how the answer reaches the speaker.
+`audio_mode` decides how the answer reaches the speaker. The default is `url` because it
+is the only mode the stock Home Assistant Voice PE firmware plays.
 
-* `api` (default): the answer is resampled to 16 kHz mono PCM and streamed over the same
-  ESPHome connection that carried the microphone audio. It works wherever the adapter
-  runs, because nothing has to reach the adapter: a host on the LAN, a container behind
-  NAT, a machine on another subnet.
-* `url`: the answer is converted to FLAC at 48 kHz and published on a local HTTP server;
-  `TTS_END` carries the URL and the device fetches it through its media player. This is
-  the classic Home Assistant path and it is fine on a host the device can reach, but it
-  needs exactly that: a reachable IP. When it is not reachable the turn ends in silence,
-  and the log shows `tts_url` with no `http_get` after it.
+* `url` (default): the answer is converted to FLAC at 48 kHz and published by a small
+  HTTP server in this adapter; `TTS_END` carries the URL and the device fetches the file
+  with its `media_player`. This is the path Home Assistant itself uses.
+* `api`: the answer is streamed as 16 kHz mono PCM with `send_voice_assistant_audio`.
+  Only works on a firmware that binds a `speaker` to `voice_assistant` (ESPHome writes
+  incoming audio into `speaker_buffer_` under `#ifdef USE_SPEAKER`). On the stock Voice PE
+  it is silently dropped, and `TTS_END` without a URL logs `"No url in TTS_END event"` and
+  returns early: events and LEDs run through, the room stays quiet.
+
+Two settings exist because the address a device can reach is not always the address the
+adapter sees:
+
+```json
+{
+  "audio_mode": "url",
+  "tts_port": 8899,
+  "tts_public_base": "http://192.168.1.10:8899"
+}
+```
+
+`tts_port` pins the port the file server listens on, `tts_public_base` is what the device
+is told. Behind NAT, in a container, or on a host with several interfaces these differ
+from `local_ip()`. In a container the port also has to be published, for example
+`ports: ["8899:8899"]`. Without both, the log shows `tts_url` and then no `http_get`,
+which means the device never fetched the file.
 
 ## Run modes
 
