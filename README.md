@@ -88,6 +88,20 @@ Every flag exists as a config key, and an explicit flag wins over the file.
 Keys are read from the environment (`MISTRAL_API_KEY`) and never from the config file, so
 a repository, a unit file or a container definition cannot leak them.
 
+## Audio back to the device: two modes
+
+`audio_mode` decides how the answer reaches the speaker, and the difference matters as
+soon as the adapter runs in a container.
+
+* `api` (default): the answer is resampled to 16 kHz mono PCM and streamed over the same
+  ESPHome connection that carried the microphone audio. Nothing else has to be reachable,
+  which is what makes it work in Docker, behind NAT, or on any host whose IP the device
+  cannot route.
+* `url`: the answer is converted to FLAC at 48 kHz and published on a local HTTP server;
+  `TTS_END` carries the URL and the device fetches it. Use it only when the adapter's IP
+  is reachable from the device, otherwise the file is never requested and the turn ends in
+  silence. Symptom: the log shows `tts_url` and no `http_get`.
+
 ## Run modes
 
 ```bash

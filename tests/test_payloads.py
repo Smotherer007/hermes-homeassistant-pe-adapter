@@ -19,6 +19,7 @@ from hermes_pe.bridge import (  # noqa: E402
     build_parser,
     build_answer_argv,
     normalize_paths,
+    pcm_chunks,
     resolve_path,
     build_stt_fields,
     build_tts_body,
@@ -95,6 +96,24 @@ class Paths(unittest.TestCase):
     def test_parser_normalizes_the_paths_it_receives(self):
         options = build_parser().parse_args(["--secrets", "~/.config/voice-pe/secrets.yaml"])
         self.assertFalse(normalize_paths(options).secrets.startswith("~"))
+
+
+class AudioChunks(unittest.TestCase):
+    """The device plays what arrives on the API connection, so the pacing matters."""
+
+    def test_chunks_are_one_hundred_milliseconds_of_16khz_mono_s16(self):
+        pcm = b"\x00" * (16000 * 2)
+        chunks = pcm_chunks(pcm)
+        self.assertEqual(len(chunks), 10)
+        self.assertEqual(len(chunks[0]), 3200)
+
+    def test_the_last_chunk_keeps_a_short_tail(self):
+        chunks = pcm_chunks(b"\x00" * 4000)
+        self.assertEqual(sum(len(c) for c in chunks), 4000)
+        self.assertEqual(len(chunks[-1]), 800)
+
+    def test_empty_input_produces_no_chunks(self):
+        self.assertEqual(pcm_chunks(b""), [])
 
 
 class AnswerArgv(unittest.TestCase):
