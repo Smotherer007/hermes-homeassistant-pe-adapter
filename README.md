@@ -132,6 +132,12 @@ python src/hermes_pe/bridge.py --config config.json say --file answer.wav
 `turn` is what a supervisor or a container should use. `daemon` keeps one ESPHome
 subscription open, which is what keeps the wake word armed on the device.
 
+## Deployment
+
+`docs/INSTALL.md` has the three ways this runs: a systemd user unit on a normal host, a
+watchdog script plus cron where there is no init system (containers with s6 or tini), and
+what a container needs in terms of published ports.
+
 ## Endpoint dialects
 
 Two shapes are supported, chosen by `stt_dialect` / `tts_dialect`:
