@@ -17,6 +17,8 @@ from hermes_pe.bridge import (  # noqa: E402
     DEFAULT_BIAS,
     apply_config_defaults,
     build_parser,
+    normalize_paths,
+    resolve_path,
     build_stt_fields,
     build_tts_body,
 )
@@ -77,6 +79,21 @@ class Defaults(unittest.TestCase):
         self.assertEqual(options.stt_url, "https://api.mistral.ai")
         self.assertEqual(options.tts_model, "voxtral-mini-tts-3-0")
         self.assertEqual(options.language, "de")
+
+
+class Paths(unittest.TestCase):
+    def test_a_home_relative_path_is_expanded(self):
+        self.assertTrue(resolve_path("~/.config/voice-pe/secrets.yaml").startswith("/"))
+
+    def test_an_environment_variable_is_expanded(self):
+        import os
+
+        os.environ["PI_TEST_DIR"] = "/tmp/pi-test"
+        self.assertEqual(resolve_path("$PI_TEST_DIR/secrets.yaml"), "/tmp/pi-test/secrets.yaml")
+
+    def test_parser_normalizes_the_paths_it_receives(self):
+        options = build_parser().parse_args(["--secrets", "~/.config/voice-pe/secrets.yaml"])
+        self.assertFalse(normalize_paths(options).secrets.startswith("~"))
 
 
 class ConfigFile(unittest.TestCase):

@@ -73,9 +73,14 @@ Every flag exists as a config key, and an explicit flag wins over the file.
 * `host` is the mDNS name or the IP of the device. Use the IP if the adapter runs in a
   container, where mDNS usually does not resolve.
 * `secrets` points at the file holding `api_key`.
+* Paths in the config may use `~` and environment variables; they are expanded before
+  use, so a unit that starts in `/` still finds `~/.config/voice-pe/secrets.yaml`.
 * `answer_cmd` receives the transcript in place of `{text}`. Its stdout is what gets
   spoken, so anything that prints an answer works: `hermes -z {text}`,
   `hermes -z {text} --continue`, or a script of your own.
+* `answer_cmd` is split like a shell command but executed without a shell, so a
+  transcript containing quotes stays text. A systemd unit does not inherit your
+  interactive PATH, so give the absolute path of the agent binary there.
 * `tts_voice` takes a preset slug such as `voice_481`, or the UUID of a saved voice.
 * `stt_bias` is a list of terms the recognizer should spell correctly. It is sent as
   `context_bias` per term to Mistral and as one `prompt` to an OpenAI style endpoint.

@@ -429,13 +429,31 @@ def to_device_pcm(wav: bytes) -> bytes:
     return process.stdout
 
 
-async def answer(command: str, transcript: str) -> str:
-    """Ask the agent (or any command) for a spoken reply."""
+async def answer(command: str, transcript: str, timeout: float = 180) -> str:
+    """Ask the agent (or any command) for a spoken reply.
+
+    The command is split like a shell would but run without a shell, so a transcript
+    containing quotes or backticks can never become a second command. That also means
+    PATH has to be right: a systemd unit does not inherit an interactive shell's PATH,
+    which is why the error names the binary instead of failing silently.
+    """
     argv = shlex.split(command.replace("{text}", transcript))
-    process = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-    )
-    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=180)
+    if not argv:
+        raise RuntimeError("answer_cmd is empty: nothing would produce a reply")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"answer command not found: {argv[0]}. Use an absolute path, or set PATH in the "
+            f"service that runs this adapter (systemd does not inherit your shell PATH)."
+        ) from error
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as error:
+        process.kill()
+        raise RuntimeError(f"answer command timed out after {timeout:.0f}s: {argv[0]}") from error
     return stdout.decode("utf-8", "replace").strip()
 
 
@@ -591,7 +609,9 @@ class Bridge:
                 return
 
             self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START, {"text": transcript})
-            reply = self.options.answer if self.options.answer else await answer(self.options.answer_cmd, transcript)
+            reply = self.options.answer if self.options.answer else await answer(
+                self.options.answer_cmd, transcript, self.options.answer_timeout,
+            )
             emit("reply", text=reply[:500])
 
             # Announce early streaming, exactly like Home Assistant: this is what the
@@ -991,6 +1011,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_path(value: str) -> str:
+    """Expand ~ and environment variables, then make the path absolute.
+
+    A config file is written by a human, so it contains "~/.config/voice-pe/secrets.yaml".
+    pathlib does not expand that on its own, and a relative path breaks as soon as the
+    working directory changes (systemd units start in /).
+    """
+    if not value:
+        return value
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(value)))
+
+
+def normalize_paths(options: argparse.Namespace) -> argparse.Namespace:
+    options.secrets = resolve_path(options.secrets)
+    options.dump = resolve_path(options.dump)
+    if options.file:
+        options.file = resolve_path(options.file)
+    return options
+
+
 def apply_config_defaults(parser: argparse.ArgumentParser, argv: list[str]) -> None:
     """Fill the parser defaults from --config, leaving every explicit flag untouched.
 
@@ -1027,7 +1067,7 @@ def apply_config_defaults(parser: argparse.ArgumentParser, argv: list[str]) -> N
 async def main() -> int:
     parser = build_parser()
     apply_config_defaults(parser, sys.argv[1:])
-    options = parser.parse_args()
+    options = normalize_paths(parser.parse_args())
 
     # An aborted tool call (Esc) must leave the device in idle, not in "thinking".
     stop = asyncio.Event()
