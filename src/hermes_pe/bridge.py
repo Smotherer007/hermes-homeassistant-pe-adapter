@@ -1052,8 +1052,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--answer-cmd", default=DEFAULT_ANSWER_CMD, help="command that produces the spoken answer")
     parser.add_argument("--tts-extra", default="", help="JSON merged into the TTS request")
     parser.add_argument("--audio-mode", default="api", choices=["api", "url"],
-                        help="api streams PCM over the ESPHome connection (works in a container); "
-                             "url serves a FLAC file the device fetches (needs a reachable IP)")
+                        help="api streams PCM over the ESPHome connection and works wherever the "
+                             "adapter runs; url serves a FLAC file the device fetches itself, "
+                             "which needs an IP the device can reach")
     parser.add_argument("--dump", default="/tmp/pe-last.wav", help="always write the raw turn here")
     parser.add_argument("--debug", action="store_true", help="log library traffic to stderr")
     parser.add_argument("--file", default="", help="WAV to play in say mode")

@@ -90,17 +90,17 @@ a repository, a unit file or a container definition cannot leak them.
 
 ## Audio back to the device: two modes
 
-`audio_mode` decides how the answer reaches the speaker, and the difference matters as
-soon as the adapter runs in a container.
+`audio_mode` decides how the answer reaches the speaker.
 
 * `api` (default): the answer is resampled to 16 kHz mono PCM and streamed over the same
-  ESPHome connection that carried the microphone audio. Nothing else has to be reachable,
-  which is what makes it work in Docker, behind NAT, or on any host whose IP the device
-  cannot route.
+  ESPHome connection that carried the microphone audio. It works wherever the adapter
+  runs, because nothing has to reach the adapter: a host on the LAN, a container behind
+  NAT, a machine on another subnet.
 * `url`: the answer is converted to FLAC at 48 kHz and published on a local HTTP server;
-  `TTS_END` carries the URL and the device fetches it. Use it only when the adapter's IP
-  is reachable from the device, otherwise the file is never requested and the turn ends in
-  silence. Symptom: the log shows `tts_url` and no `http_get`.
+  `TTS_END` carries the URL and the device fetches it through its media player. This is
+  the classic Home Assistant path and it is fine on a host the device can reach, but it
+  needs exactly that: a reachable IP. When it is not reachable the turn ends in silence,
+  and the log shows `tts_url` with no `http_get` after it.
 
 ## Run modes
 
