@@ -15,6 +15,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from hermes_pe.bridge import (  # noqa: E402
     DEFAULT_ANSWER_CMD,
     DEFAULT_BIAS,
+    MODE_SELF_ANSWERING,
+    Bridge,
     apply_config_defaults,
     build_parser,
     build_answer_argv,
@@ -185,6 +187,37 @@ class ConfigFile(unittest.TestCase):
         parser = build_parser()
         apply_config_defaults(parser, ["--config", "/nope/missing.json"])
         self.assertEqual(parser.parse_args([]).language, "de")
+
+
+class ServingModes(unittest.TestCase):
+    """`serve` exists because `daemon` waits for a driver and `turn` exits.
+
+    The regression this guards against is the one that cost a live session: a mode that
+    looks long-running but never answers, because nothing feeds its stdin.
+    """
+
+    def test_every_self_answering_mode_parses(self):
+        parser = build_parser()
+        for mode in MODE_SELF_ANSWERING:
+            self.assertEqual(parser.parse_args([mode]).mode, mode)
+
+    def test_daemon_is_deliberately_not_self_answering(self):
+        self.assertNotIn("daemon", MODE_SELF_ANSWERING)
+
+    def test_serve_is_implemented_and_keeps_the_subscription(self):
+        import inspect
+
+        self.assertTrue(inspect.iscoroutinefunction(Bridge.run_serve))
+        source = inspect.getsource(Bridge.run_serve)
+        self.assertIn("subscribe_voice_assistant", source)
+        self.assertNotIn("inbox", source)
+
+    def test_turn_and_serve_share_one_answer_path(self):
+        import inspect
+
+        self.assertTrue(inspect.iscoroutinefunction(Bridge.answer_and_speak))
+        for mode_method in (Bridge.run_turn, Bridge.run_serve):
+            self.assertIn("answer_and_speak", inspect.getsource(mode_method))
 
 
 if __name__ == "__main__":

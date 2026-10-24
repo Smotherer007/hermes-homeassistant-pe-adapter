@@ -21,7 +21,8 @@ so a turn looks the same as it does with Home Assistant.
 
 Run modes
     turn            one conversation turn, then exit (default)
-    daemon          keep listening, one turn after another
+    serve           keep listening, answer every turn in the same subscription
+    daemon          keep listening but answer only what a driver sends on stdin
     probe           print what the device reports and exit
     say             play a WAV file on the device and exit
     listen          wait for the wake word, capture one sentence, print the transcript
@@ -61,6 +62,11 @@ except ImportError:  # pragma: no cover - the extension installs it via uv
     webrtcvad = None
 
 SAMPLE_RATE = 16_000
+
+# Modes that answer a turn without a driver. `daemon` is deliberately absent: it holds
+# the subscription but waits for {"cmd": "answer", ...} on stdin, which only the pi
+# extension sends. Everything in this tuple runs a full turn by itself.
+MODE_SELF_ANSWERING = ("turn", "serve")
 
 # One device, one bridge: several daemons would each arm the wake word and each
 # receive the audio, which produces duplicated and empty turns.
@@ -579,6 +585,85 @@ class Bridge:
         if self.client is not None:
             self.client.send_voice_assistant_event(event_type, data)
 
+    async def answer_and_speak(self, transcript: str) -> None:
+        """Answer one transcript and play it out — the part all serving modes share.
+
+        Both `turn` (one question per process) and `serve` (subscription stays open) run
+        exactly this, so the event order, the TTS dialect handling and the playback
+        wait cannot drift apart between the modes.
+        """
+        async with aiohttp.ClientSession() as http:
+            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START, {"text": transcript})
+            reply = self.options.answer if self.options.answer else await answer(
+                self.options.answer_cmd, transcript, self.options.answer_timeout,
+            )
+            emit("reply", text=reply[:500])
+
+            # Announce early streaming, exactly like Home Assistant: this is what the
+            # firmware's on_intent_progress checks to switch the LED ring to "replying".
+            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_PROGRESS, {"tts_start_streaming": "1"})
+            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_END, {
+                "conversation_id": "",
+                "continue_conversation": "False",
+                "speech": reply,
+            })
+
+            sentences = split_sentences(reply)
+            name = f"{int(time.time() * 1000)}.wav"
+            parts: list[bytes] = []
+            for index, sentence in enumerate(sentences, start=1):
+                part = await synthesize(
+                    http, self.options.tts_url, self.options.tts_model, sentence, self.options.tts_extra,
+                    voice=self.options.tts_voice, dialect=self.options.tts_dialect, key=self.options.tts_key,
+                )
+                parts.append(part)
+                emit("tts", part=index, of=len(sentences), bytes=len(part))
+
+            merged = merge_wavs(parts)
+            duration = wav_seconds(merged)
+            started = time.monotonic()
+
+            if self.options.audio_mode == "api":
+                # Everything stays on the ESPHome connection: no URL, no second port, and
+                # therefore nothing the device has to be able to reach. Only firmware that
+                # binds a speaker to voice_assistant plays this; the stock Voice PE
+                # returns early in TTS_END when the event carries no url.
+                client = self.client
+                if client is None:
+                    raise RuntimeError("audio_mode api needs the device connection")
+                pcm = to_device_pcm(merged)
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": reply})
+                chunks = pcm_chunks(pcm)
+                for index, chunk in enumerate(chunks, start=1):
+                    client.send_voice_assistant_audio(chunk)
+                    if index % 10 == 0 or index == len(chunks):
+                        emit("tts_stream", sent=index, of=len(chunks), bytes=len(chunk) * index)
+                    await asyncio.sleep(0.08)
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": ""})
+                emit("tts_played", mode="api", seconds=round(duration, 2), pcm_bytes=len(pcm))
+            else:
+                flac = to_flac(merged, 48000)
+                name = name.replace(".wav", ".flac")
+                self.tts_server.publish(name, flac)
+                emit("tts_file", flac_bytes=len(flac), seconds=round(duration, 2))
+
+                # The device fetches the file itself and plays it through its media player.
+                # `tts_public_base` exists because the adapter's own IP is often not the one
+                # the device can reach: inside a container it is a bridge address, and the
+                # reachable address is the published port on the host.
+                base = (self.options.tts_public_base or f"http://{self.local_ip}:{self.tts_server.port}").rstrip("/")
+                url = f"{base}/tts/{name}"
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": reply})
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": url})
+                emit("tts_url", url=url, seconds=round(duration, 2))
+
+        # Keep the run open until the device finished speaking, then close it so the
+        # LED ring returns to idle at the right moment.
+        await asyncio.sleep(max(0.8, duration + 1.0 - (time.monotonic() - started)))
+        self.event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END)
+        spoke = round(self.utterance.seconds, 2) if self.utterance else 0
+        emit("done", seconds=spoke, played=round(duration, 2))
+
     async def run_turn(self) -> None:
         assert self.client is not None
         self.turn_done = asyncio.Event()
@@ -646,77 +731,13 @@ class Bridge:
             )
             self.event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_END, {"text": transcript})
             emit("transcript", text=transcript, seconds=round(self.utterance.seconds, 2), wav_bytes=len(wav))
-            if not transcript:
-                emit("error", reason="empty transcript")
-                unsubscribe()
-                return
 
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START, {"text": transcript})
-            reply = self.options.answer if self.options.answer else await answer(
-                self.options.answer_cmd, transcript, self.options.answer_timeout,
-            )
-            emit("reply", text=reply[:500])
+        if not transcript:
+            emit("error", reason="empty transcript")
+            unsubscribe()
+            return
 
-            # Announce early streaming, exactly like Home Assistant: this is what the
-            # firmware's on_intent_progress checks to switch the LED ring to "replying".
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_PROGRESS, {"tts_start_streaming": "1"})
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_END, {
-                "conversation_id": "",
-                "continue_conversation": "False",
-                "speech": reply,
-            })
-
-            sentences = split_sentences(reply)
-            name = f"{int(time.time() * 1000)}.wav"
-            parts: list[bytes] = []
-            for index, sentence in enumerate(sentences, start=1):
-                part = await synthesize(
-                    http, self.options.tts_url, self.options.tts_model, sentence, self.options.tts_extra,
-                    voice=self.options.tts_voice, dialect=self.options.tts_dialect, key=self.options.tts_key,
-                )
-                parts.append(part)
-                emit("tts", part=index, of=len(sentences), bytes=len(part))
-
-        merged = merge_wavs(parts)
-        duration = wav_seconds(merged)
-        started = time.monotonic()
-
-        if self.options.audio_mode == "api":
-            # Everything stays on the ESPHome connection: no URL, no second port, and
-            # therefore nothing the device has to be able to reach. This is the only
-            # mode that works when the adapter runs inside a container whose IP is not
-            # routable from the LAN.
-            pcm = to_device_pcm(merged)
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": reply})
-            chunks = pcm_chunks(pcm)
-            for index, chunk in enumerate(chunks, start=1):
-                self.client.send_voice_assistant_audio(chunk)
-                if index % 10 == 0 or index == len(chunks):
-                    emit("tts_stream", sent=index, of=len(chunks), bytes=len(chunk) * index)
-                await asyncio.sleep(0.08)
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": ""})
-            emit("tts_played", mode="api", seconds=round(duration, 2), pcm_bytes=len(pcm))
-        else:
-            flac = to_flac(merged, 48000)
-            name = name.replace(".wav", ".flac")
-            self.tts_server.publish(name, flac)
-            emit("tts_file", flac_bytes=len(flac), seconds=round(duration, 2))
-
-            # The device fetches the file itself and plays it through its media player.
-            # `tts_public_base` exists because the adapter's own IP is often not the one
-            # the device can reach: inside a container it is a bridge address, and the
-            # reachable address is the published port on the host.
-            base = (self.options.tts_public_base or f"http://{self.local_ip}:{self.tts_server.port}").rstrip("/")
-            url = f"{base}/tts/{name}"
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": reply})
-            self.event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": url})
-            emit("tts_url", url=url, seconds=round(duration, 2))
-
-        # Keep the run open until the device finished speaking, then close it so the
-        # LED ring returns to idle at the right moment.
-        await asyncio.sleep(max(0.8, duration + 1.0 - (time.monotonic() - started)))
-        self.event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END)
-        emit("done", seconds=round(self.utterance.seconds, 2), played=round(duration, 2))
+        await self.answer_and_speak(transcript)
         unsubscribe()
 
     async def listen_once(self) -> None:
@@ -908,6 +929,104 @@ class Bridge:
             if callable(unsubscribe):
                 unsubscribe()
 
+    async def run_serve(self) -> None:
+        """Hold the subscription and answer every turn on its own.
+
+        This is the standalone mode. `turn` answers end to end but exits, so a supervisor
+        has to restart it and the device is unsubscribed in between; `daemon` keeps the
+        subscription but only speaks what a driver sends on stdin. `serve` is both: one
+        subscription for the life of the process, a full turn per question, no reconnect
+        gap between turns.
+        """
+        assert self.client is not None
+        # Locals for the closures: pyright cannot narrow `self.client` inside a nested
+        # function, and these run per audio chunk.
+        client = self.client
+        turn_done = asyncio.Event()
+        self.turn_done = turn_done
+
+        async def watch_stop() -> None:
+            """End the run and the process when SIGTERM arrives."""
+            await self.stop_event.wait()
+            try:
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END)
+            finally:
+                sys.stdout.flush()
+                os._exit(0)
+
+        asyncio.get_running_loop().create_task(watch_stop())
+
+        async def handle_start(wake_word_phrase: str, flags: int, audio_settings, conversation_id) -> int:
+            emit("wake", phrase=wake_word_phrase or "okay nabu", flags=flags)
+            self.chunks = 0
+            self.sent_listening = False
+            self.tts_end_sent = False
+            self.utterance = Utterance(self.options.silence_ms, self.options.max_seconds, self.options.speech_rms)
+            turn_done.clear()
+            asyncio.get_running_loop().create_task(self.announce_start())
+            return 0
+
+        async def handle_audio(data: bytes, conversation_id) -> None:
+            if self.utterance is None or turn_done.is_set():
+                return
+            was_speaking = self.utterance.speaking
+            finished = self.utterance.push(data)
+            if self.utterance.speaking and not was_speaking and not self.sent_listening:
+                self.sent_listening = True
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_START)
+            if finished:
+                turn_done.set()
+
+        async def handle_stop(aborted: bool) -> None:
+            turn_done.set()
+
+        unsubscribe = client.subscribe_voice_assistant(
+            handle_start=handle_start, handle_stop=handle_stop, handle_audio=handle_audio,
+        )
+        # A previous run may have been killed mid-turn: close it so the LED ring falls
+        # back to idle instead of blinking forever.
+        self.event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END)
+        emit("armed", mode="serve", silence_ms=self.options.silence_ms, max_seconds=self.options.max_seconds)
+
+        try:
+            while True:
+                self.turn_done.clear()
+                self.utterance = None
+                try:
+                    await asyncio.wait_for(self.turn_done.wait(), timeout=self.options.timeout)
+                except asyncio.TimeoutError:
+                    emit("idle", reason="no wake word; still armed")
+                    continue
+
+                if self.utterance is None or not self.utterance.speaking:
+                    emit("idle", reason="no speech detected")
+                    continue
+
+                # LED: thinking — the device keeps this phase until the turn ends.
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END)
+                wav = self.utterance.wav()
+                pathlib.Path(self.options.dump).write_bytes(wav)
+                async with aiohttp.ClientSession() as http:
+                    transcript = await transcribe(
+                        http, self.options.stt_url, wav, self.options.language,
+                        **transcribe_options(self.options),
+                    )
+                self.event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_END, {"text": transcript})
+                emit("transcript", text=transcript, seconds=round(self.utterance.seconds, 2),
+                     reason="silence" if not self.utterance.cap_hit else "max_seconds",
+                     dump=self.options.dump, frames=self.utterance.frames_total,
+                     speech_frames=self.utterance.frames_speech)
+                if not transcript:
+                    self.event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END)
+                    continue
+
+                # Answers itself — this is the difference to `daemon`.
+                await self.answer_and_speak(transcript)
+                emit("turn_end")
+        finally:
+            if callable(unsubscribe):
+                unsubscribe()
+
     async def play_in_session(self, wav_path: pathlib.Path, transcript: str) -> None:
         """Speak a file inside the open run, and wait for the device to finish.
 
@@ -1082,7 +1201,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--file", default="", help="WAV to play in say mode")
     parser.add_argument("--volume", type=float, default=None,
                         help="media player volume before playing, 0..1 (omitted = leave as is)")
-    parser.add_argument("mode", choices=("turn", "daemon", "probe", "say", "listen"), nargs="?", default="turn")
+    parser.add_argument("mode", choices=("turn", "serve", "daemon", "probe", "say", "listen"), nargs="?", default="turn")
     return parser
 
 
@@ -1172,12 +1291,15 @@ async def main() -> int:
         if options.mode == "probe":
             emit("probe", host=options.host)
             return 0
-        if options.mode == "daemon":
+        if options.mode in ("daemon", "serve"):
             if not acquire_pid_file():
                 emit("error", reason=f"another bridge already owns {PID_FILE}")
                 return 1
             try:
-                await bridge.run_daemon()
+                if options.mode == "serve":
+                    await bridge.run_serve()
+                else:
+                    await bridge.run_daemon()
             finally:
                 release_pid_file()
             return 0
