@@ -429,6 +429,133 @@ def to_device_pcm(wav: bytes) -> bytes:
     return process.stdout
 
 
+def build_answer_argv(command: str, transcript: str) -> list[str]:
+    """Split the command template first, then insert the transcript as one argument.
+
+    Splitting the *substituted* string would turn a spoken sentence into several
+    arguments: `hermes -z {text}` with "Wie lange kochen?" became
+    `hermes -z Wie lange kochen?`, and the agent saw "Wie" as its prompt and the rest as
+    trailing arguments. The transcript is data, never part of the command line.
+    """
+    head, placeholder, tail = command.partition("{text}")
+    argv = shlex.split(head)
+    if placeholder:
+        argv.append(transcript)
+        argv.extend(shlex.split(tail))
+    else:
+        # A template without the placeholder still gets the text, or the agent would
+        # be asked the same question forever.
+        argv.append(transcript)
+    return argv
+
+
+async def answer(command: str, transcript: str, timeout: float = 180) -> str:
+    """Ask the agent (or any command) for a spoken reply.
+
+    The command is split like a shell would but run without a shell, so a transcript
+    containing quotes or backticks can never become a second command. That also means
+    PATH has to be right: a systemd unit does not inherit an interactive shell's PATH,
+    which is why the error names the binary instead of failing silently.
+    """
+    argv = build_answer_argv(command, transcript)
+    if not argv:
+        raise RuntimeError("answer_cmd is empty: nothing would produce a reply")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"answer command not found: {argv[0]}. Use an absolute path, or set PATH in the "
+            f"service that runs this adapter (systemd does not inherit your shell PATH)."
+        ) from error
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as error:
+        process.kill()
+        raise RuntimeError(f"answer command timed out after {timeout:.0f}s: {argv[0]}") from error
+    return stdout.decode("utf-8", "replace").strip()
+
+
+def local_ip() -> str:
+    """The address the device can reach us on (no traffic is sent)."""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("192.0.2.1", 9))  # TEST-NET-1: a UDP connect sends nothing
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+def wav_seconds(wav: bytes) -> float:
+    with wave.open(io.BytesIO(wav), "rb") as handle:
+        return handle.getnframes() / handle.getframerate()
+
+
+def to_flac(wav: bytes, sample_rate: int) -> bytes:
+    """The device's media player decodes FLAC only, so convert before serving."""
+    process = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "flac",
+         "-ar", str(sample_rate), "-ac", "1", "pipe:1"],
+        input=wav,
+        capture_output=True,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(f"flac conversion failed: {process.stderr.decode('utf-8', 'replace')[:200]}")
+    return process.stdout
+
+
+def merge_wavs(parts: list[bytes]) -> bytes:
+    """Concatenate WAV files that share format; the first header wins."""
+    if not parts:
+        return b""
+    with wave.open(io.BytesIO(parts[0]), "rb") as first:
+        params = first.getparams()
+        frames = [first.readframes(first.getnframes())]
+    for part in parts[1:]:
+        with wave.open(io.BytesIO(part), "rb") as handle:
+            frames.append(handle.readframes(handle.getnframes()))
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setparams(params)
+        for chunk in frames:
+            out.writeframes(chunk)
+    return buffer.getvalue()
+
+
+def split_sentences(text: str, max_chars: int = 160) -> list[str]:
+    """Split a reply into speakable pieces so TTS can start before the end is built."""
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    sentences: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        while len(part) > max_chars:
+            cut = part.rfind(" ", 0, max_chars)
+            cut = cut if cut > 40 else max_chars
+            sentences.append(part[:cut].strip())
+            part = part[cut:].strip()
+        if part:
+            sentences.append(part)
+    return sentences or [text.strip()]
+
+
+def to_device_pcm(wav: bytes) -> bytes:
+    """Resample whatever the TTS server returned to the 16 kHz mono s16 the device wants."""
+    process = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1",
+         "-ar", str(SAMPLE_RATE), "pipe:1"],
+        input=wav,
+        capture_output=True,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {process.stderr.decode('utf-8', 'replace')[:300]}")
+    return process.stdout
+
+
 async def answer(command: str, transcript: str, timeout: float = 180) -> str:
     """Ask the agent (or any command) for a spoken reply.
 

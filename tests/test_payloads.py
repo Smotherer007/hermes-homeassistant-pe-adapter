@@ -17,6 +17,7 @@ from hermes_pe.bridge import (  # noqa: E402
     DEFAULT_BIAS,
     apply_config_defaults,
     build_parser,
+    build_answer_argv,
     normalize_paths,
     resolve_path,
     build_stt_fields,
@@ -94,6 +95,26 @@ class Paths(unittest.TestCase):
     def test_parser_normalizes_the_paths_it_receives(self):
         options = build_parser().parse_args(["--secrets", "~/.config/voice-pe/secrets.yaml"])
         self.assertFalse(normalize_paths(options).secrets.startswith("~"))
+
+
+class AnswerArgv(unittest.TestCase):
+    """The regression that produced a wrong answer: the transcript must stay one argument."""
+
+    def test_a_spoken_sentence_stays_a_single_argument(self):
+        argv = build_answer_argv("hermes -z {text}", "Wie lange muss ich Spaghetti kochen?")
+        self.assertEqual(argv, ["hermes", "-z", "Wie lange muss ich Spaghetti kochen?"])
+
+    def test_arguments_after_the_placeholder_survive(self):
+        argv = build_answer_argv("hermes -z {text} --continue", "und jetzt das andere")
+        self.assertEqual(argv, ["hermes", "-z", "und jetzt das andere", "--continue"])
+
+    def test_quotes_in_a_transcript_do_not_start_a_second_command(self):
+        argv = build_answer_argv("hermes -z {text}", "sag \"hallo\"; rm -rf /tmp/x")
+        self.assertIn("sag \"hallo\"; rm -rf /tmp/x", argv)
+        self.assertEqual(len(argv), 3)
+
+    def test_a_template_without_the_placeholder_still_gets_the_text(self):
+        self.assertEqual(build_answer_argv("hermes", "hallo"), ["hermes", "hallo"])
 
 
 class ConfigFile(unittest.TestCase):
