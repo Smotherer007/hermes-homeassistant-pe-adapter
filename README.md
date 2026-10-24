@@ -132,6 +132,13 @@ python src/hermes_pe/bridge.py --config config.json say --file answer.wav
 `turn` is what a supervisor or a container should use. `daemon` keeps one ESPHome
 subscription open, which is what keeps the wake word armed on the device.
 
+## The device side
+
+`device/` holds the firmware patch for a Home Assistant Voice PE that never saw a Home
+Assistant: a fixed name, WiFi from `!secret`, and a fixed API key. Without it the device
+stays in onboarding and there is no key for the adapter to authenticate with. See
+`device/README.md`.
+
 ## Deployment
 
 `docs/INSTALL.md` has the three ways this runs: a systemd user unit on a normal host, a
